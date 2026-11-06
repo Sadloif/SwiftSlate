@@ -1,0 +1,85 @@
+name: Fork build (debug APK)
+
+# Builds an installable debug APK for any push to a feature branch, and
+# refreshes the rolling "fork-latest" prerelease so there is a permanent
+# download link that does not need GitHub Actions UI access.
+#
+# Debug-signed on purpose: no signing secrets, and it installs over the
+# previous fork build (versionCode is derived from the clock, not from a
+# per-workflow run number, so it never goes backwards).
+
+on:
+  push:
+    branches: ['feat/**']
+    paths:
+      - 'app/**'
+      - 'build.gradle.kts'
+      - 'settings.gradle.kts'
+      - 'gradle/**'
+      - 'gradle.properties'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: fork-build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build debug APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install SDK packages
+        shell: bash
+        run: sdkmanager "platforms;android-37" "build-tools;37.0.0" "platform-tools"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Unit tests
+        shell: bash
+        run: ./gradlew testDebugUnitTest --no-daemon
+
+      - name: Build debug APK
+        shell: bash
+        run: |
+          VC=$(( $(date +%s) / 60 ))
+          ./gradlew assembleDebug --no-daemon \
+            -PversionCode="$VC" \
+            -PversionName="fork-$(date +%Y%m%d-%H%M)-${GITHUB_SHA:0:7}"
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: SwiftSlate-fork-${{ github.ref_name }}
+          path: app/build/outputs/apk/debug/app-debug.apk
+          retention-days: 30
+
+      - name: Update rolling release
+        if: success() && github.ref == 'refs/heads/feat/settings-ui'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: fork-latest
+          name: Fork build (latest)
+          body: |
+            Automated debug build of `${{ github.ref_name }}` at `${{ github.sha }}`.
+            Debug-signed — installs over the previous fork build.
+          prerelease: true
+          files: app/build/outputs/apk/debug/app-debug.apk
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
