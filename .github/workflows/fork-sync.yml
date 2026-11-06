@@ -59,14 +59,17 @@ jobs:
             exit 1
           fi
 
-      - name: Rebase feature branch onto master
+      - name: Rebase feature branch onto upstream
         shell: bash
         run: |
           git fetch origin "$FEATURE_BRANCH"
           git checkout -B "$FEATURE_BRANCH" "origin/$FEATURE_BRANCH"
-          git fetch origin master
+          # Upstream, not origin: the feature branch is what gets offered as a pull
+          # request, so it must sit on the maintainer's master. Rebasing onto the
+          # fork's master would drag this fork's CI commits into that PR's diff.
+          git fetch upstream master
 
-          if git rebase origin/master; then
+          if git rebase upstream/master; then
             git push --force-with-lease origin HEAD:"$FEATURE_BRANCH"
           else
             git rebase --abort
