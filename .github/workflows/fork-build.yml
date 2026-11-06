@@ -1,29 +1,30 @@
 name: Fork build (debug APK)
 
-# Builds an installable debug APK for any push to a feature branch, and
-# refreshes the rolling "fork-latest" prerelease so there is a permanent
-# download link that does not need GitHub Actions UI access.
+# Builds an installable debug APK for a chosen branch and refreshes the rolling
+# "fork-latest" prerelease, so there is a permanent download link.
 #
-# Debug-signed on purpose: no signing secrets, and it installs over the
-# previous fork build (versionCode is derived from the clock, not from a
-# per-workflow run number, so it never goes backwards).
+# Dispatch-only on purpose: this file lives on master, and the feature branches
+# must not carry it — they are the branches offered upstream as pull requests,
+# and fork-only CI in that diff would land in the upstream repo.
+#
+# Debug-signed: no signing secrets, and it installs over the previous fork build
+# (versionCode comes from the clock, so it never goes backwards).
+#
+# Use: Actions → "Fork build (debug APK)" → Run workflow → pick the branch.
 
 on:
-  push:
-    branches: ['feat/**']
-    paths:
-      - 'app/**'
-      - 'build.gradle.kts'
-      - 'settings.gradle.kts'
-      - 'gradle/**'
-      - 'gradle.properties'
   workflow_dispatch:
+    inputs:
+      ref:
+        description: Branch, tag or SHA to build
+        required: false
+        default: feat/settings-ui
 
 permissions:
   contents: write
 
 concurrency:
-  group: fork-build-${{ github.ref }}
+  group: fork-build-${{ inputs.ref || github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -31,9 +32,13 @@ jobs:
     name: Build debug APK
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    env:
+      TARGET_REF: ${{ inputs.ref || github.ref_name }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TARGET_REF }}
 
       - name: Set up JDK
         uses: actions/setup-java@v4
@@ -51,6 +56,8 @@ jobs:
       - name: Build debug APK
         shell: bash
         run: |
+          # versionCode must increase between builds or Android refuses to
+          # install over the previous one; minutes since the epoch fits in Int.
           VC=$(( $(date +%s) / 60 ))
           ./gradlew assembleDebug --no-daemon \
             -PversionCode="$VC" \
@@ -59,19 +66,17 @@ jobs:
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          # Artifact names cannot contain "/", and ref_name does for feat/* branches.
           name: SwiftSlate-fork-${{ github.run_number }}
           path: app/build/outputs/apk/debug/app-debug.apk
           retention-days: 30
 
       - name: Update rolling release
-        if: success() && github.ref == 'refs/heads/feat/settings-ui'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: fork-latest
           name: Fork build (latest)
           body: |
-            Automated debug build of `${{ github.ref_name }}` at `${{ github.sha }}`.
+            Automated debug build of `${{ env.TARGET_REF }}` at `${{ github.sha }}`.
             Debug-signed — installs over the previous fork build.
           prerelease: true
           files: app/build/outputs/apk/debug/app-debug.apk
