@@ -1,0 +1,127 @@
+name: Fork sync & rebuild
+
+# Keeps this fork current with upstream and produces an installable APK.
+#
+# A fork is a snapshot: nothing flows in from Musheer360/SwiftSlate on its own.
+# This job merges upstream master into the fork's master, rebases the feature
+# branch back on top of it, and only then builds — so the downloaded APK always
+# contains both upstream's latest fixes and this fork's changes.
+#
+# If the upstream merge or the rebase conflicts, the job stops and leaves the
+# branches untouched: a red run is better than a silently broken tree.
+
+on:
+  schedule:
+    - cron: '17 4 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: fork-sync
+  cancel-in-progress: false
+
+env:
+  UPSTREAM: Musheer360/SwiftSlate
+  FEATURE_BRANCH: feat/settings-ui
+
+jobs:
+  sync:
+    name: Sync, rebase, build
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - name: Checkout master
+        uses: actions/checkout@v4
+        with:
+          ref: master
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Merge upstream master
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          # A merge (not a fast-forward) is deliberate: once the fork's master
+          # carries its own commits (this automation, for one) it can never
+          # fast-forward from upstream again.
+          git remote add upstream "https://github.com/${UPSTREAM}.git"
+          git fetch upstream master
+
+          if git merge --no-edit upstream/master; then
+            git push origin HEAD:master
+          else
+            git merge --abort
+            echo "::error::Upstream master conflicts with this fork's master. Resolve it locally, then re-run."
+            exit 1
+          fi
+
+      - name: Rebase feature branch onto master
+        shell: bash
+        run: |
+          git fetch origin "$FEATURE_BRANCH"
+          git checkout -B "$FEATURE_BRANCH" "origin/$FEATURE_BRANCH"
+          git fetch origin master
+
+          if git rebase origin/master; then
+            git push --force-with-lease origin HEAD:"$FEATURE_BRANCH"
+          else
+            git rebase --abort
+            echo "::error::Rebase conflict on ${FEATURE_BRANCH}. The branch was left untouched — rebase it locally."
+            exit 1
+          fi
+
+      # Pushes made with GITHUB_TOKEN do not trigger other workflows, so the
+      # build happens here instead of relying on the push-triggered one.
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install SDK packages
+        shell: bash
+        run: sdkmanager "platforms;android-37" "build-tools;37.0.0" "platform-tools"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Test and build
+        shell: bash
+        run: |
+          # versionCode must increase between builds or Android refuses to
+          # install over the previous one. run_number resets per workflow, so
+          # use minutes since the epoch instead (fits in Int until 2318).
+          VC=$(( $(date +%s) / 60 ))
+          ./gradlew testDebugUnitTest assembleDebug --no-daemon \
+            -PversionCode="$VC" \
+            -PversionName="fork-$(date +%Y%m%d-%H%M)"
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: SwiftSlate-fork-debug
+          path: app/build/outputs/apk/debug/app-debug.apk
+          retention-days: 30
+
+      - name: Update rolling release
+        if: success()
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: fork-latest
+          name: Fork build (latest)
+          body: |
+            Automated debug build of `${{ env.FEATURE_BRANCH }}` after syncing upstream.
+
+            Contains upstream `${{ env.UPSTREAM }}` master plus this fork's changes.
+            Signed with the debug key — reinstall over the previous fork build.
+          prerelease: true
+          files: app/build/outputs/apk/debug/app-debug.apk
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
